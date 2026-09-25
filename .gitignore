@@ -1,0 +1,33 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Frontend dependencies
+node_modules/
+.npm/
+dist/
+build/
+
+# Database and Vector Store files
+*.db
+*.sqlite
+*.sqlite3
+scheme_analyzer.db
+faiss_index.bin
+faiss_meta.pkl
+
+# IDE / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
