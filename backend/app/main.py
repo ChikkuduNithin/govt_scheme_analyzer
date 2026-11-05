@@ -1,8 +1,21 @@
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+env_path = BASE_DIR / ".env"
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path)
+else:
+    load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.core.config import settings
+from app.api.api_v1.api import api_router
 
 app = FastAPI(
-    title="Government Scheme Analyzer API",
+    title=settings.PROJECT_NAME,
     description="API for the Government Scheme Analyzer project",
     version="0.1.0",
 )
@@ -15,9 +28,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-from app.api.api_v1.api import api_router
-from app.core.config import settings
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
 

@@ -1,26 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Any
 import shutil
 import os
 
-from app.db.session import get_db
+from app.api import deps
 from app.models.scheme import Scheme
 from app.models.eligibility import EligibilityRule
-from app.models.document import Document, DocumentChunk
-from app.ingestion.embeddings import generate_embeddings
-from app.rag.faiss_store import faiss_store
-
-# Mock imports for extraction/chunking
-# In production, use PyMuPDF and Langchain text splitters
-def extract_text_mock(file_path: str) -> str:
-    # Basic mock for now - you'd replace with real PyMuPDF extraction
-    return "This is mock extracted text from the uploaded PDF detailing the scheme."
-
-def chunk_text_mock(text: str) -> List[str]:
-    # Mock chunking
-    return [text[i:i+500] for i in range(0, len(text), 500)]
+from app.models.document import Document
+from app.models.user import User
+from app.ingestion.pipeline import process_document
 
 router = APIRouter()
 
@@ -28,7 +18,7 @@ class RuleCreate(BaseModel):
     rule_type: str
     field: str
     operator: str
-    value: str
+    value: Any
     description: str
 
 class SchemeCreate(BaseModel):
@@ -36,10 +26,15 @@ class SchemeCreate(BaseModel):
     department: str
     state: str
     description: str
-    rules: List[RuleCreate]
+    rules: Optional[List[RuleCreate]] = []
 
 @router.post("/schemes/")
-def create_scheme(scheme_in: SchemeCreate, db: Session = Depends(get_db)):
+def create_scheme(
+    scheme_in: SchemeCreate, 
+    db: Session = Depends(deps.get_db),
+    current_user: Optional[User] = Depends(deps.get_current_active_user)
+):
+    """Create a new government scheme with structured mathematical eligibility rules."""
     # Create Scheme
     scheme = Scheme(
         name=scheme_in.name,
@@ -53,97 +48,76 @@ def create_scheme(scheme_in: SchemeCreate, db: Session = Depends(get_db)):
     db.refresh(scheme)
     
     # Create Rules
-    for r in scheme_in.rules:
-        # Try to parse value to int/float if possible
-        val = r.value
-        try:
-            if "." in val:
-                val = float(val)
-            else:
-                val = int(val)
-        except:
-            if "," in val:
-                val = [v.strip() for v in val.split(",")]
-                
-        rule = EligibilityRule(
-            scheme_id=scheme.id,
-            rule_type=r.rule_type,
-            condition={"field": r.field, "operator": r.operator, "value": val},
-            description=r.description
-        )
-        db.add(rule)
-    db.commit()
-    return {"message": "Scheme created successfully", "scheme_id": scheme.id}
-
-
-def process_document_background(db: Session, scheme_id: int, doc_id: int, file_path: str):
-    try:
-        # 1. Extract Text
-        text = extract_text_mock(file_path)
-        
-        # 2. Chunk
-        chunks_text = chunk_text_mock(text)
-        
-        # 3. Embed
-        embeddings = generate_embeddings(chunks_text)
-        
-        # 4. Save to DB and FAISS
-        chunk_ids = []
-        for i, chunk_txt in enumerate(chunks_text):
-            chunk = DocumentChunk(
-                document_id=doc_id,
-                scheme_id=scheme_id,
-                text=chunk_txt,
-                page_number=1,
-                section=f"Section {i+1}"
+    created_rules = []
+    if scheme_in.rules:
+        for r in scheme_in.rules:
+            val = r.value
+            # Type cast strings to numbers/lists if needed
+            if isinstance(val, str):
+                try:
+                    if "." in val:
+                        val = float(val)
+                    else:
+                        val = int(val)
+                except ValueError:
+                    if "," in val:
+                        val = [v.strip() for v in val.split(",")]
+                    elif val.lower() == "true":
+                        val = True
+                    elif val.lower() == "false":
+                        val = False
+                        
+            rule = EligibilityRule(
+                scheme_id=scheme.id,
+                rule_type=r.rule_type,
+                condition={"field": r.field, "operator": r.operator, "value": val},
+                description=r.description
             )
-            db.add(chunk)
-            db.commit()
-            db.refresh(chunk)
-            chunk_ids.append(chunk.id)
-            
-        faiss_store.add_embeddings(chunk_ids, embeddings)
-        
-        # Update Doc Status
-        doc = db.query(Document).filter(Document.id == doc_id).first()
-        doc.status = "COMPLETED"
+            db.add(rule)
+            created_rules.append(rule)
         db.commit()
         
-    except Exception as e:
-        print(f"Error processing document: {e}")
-        doc = db.query(Document).filter(Document.id == doc_id).first()
-        doc.status = "FAILED"
-        db.commit()
+    return {
+        "message": "Scheme created successfully", 
+        "scheme_id": scheme.id,
+        "rules_count": len(created_rules)
+    }
 
 @router.post("/schemes/{scheme_id}/documents/")
-def upload_scheme_document(
+async def upload_scheme_document(
     scheme_id: int, 
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...), 
-    db: Session = Depends(get_db)
+    db: Session = Depends(deps.get_db),
+    current_user: Optional[User] = Depends(deps.get_current_active_user)
 ):
+    """Upload PDF/document for a scheme and trigger real background ingestion into FAISS."""
     scheme = db.query(Scheme).filter(Scheme.id == scheme_id).first()
     if not scheme:
         raise HTTPException(status_code=404, detail="Scheme not found")
         
-    # Save file locally
-    os.makedirs("uploads", exist_ok=True)
-    file_path = f"uploads/{scheme_id}_{file.filename}"
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-        
+    filename = file.filename or "uploaded.pdf"
+    ext = filename.split('.')[-1].lower() if '.' in filename else 'pdf'
+    
+    # Read bytes
+    file_bytes = await file.read()
+    
     # Create DB Entry
     doc = Document(
         scheme_id=scheme.id,
-        filename=file.filename,
-        file_type="pdf",
-        status="PROCESSING"
+        filename=filename,
+        file_type=ext,
+        status="UPLOADED"
     )
     db.add(doc)
     db.commit()
     db.refresh(doc)
     
-    # Process in background (Production strategy step 2)
-    background_tasks.add_task(process_document_background, db, scheme.id, doc.id, file_path)
+    # Process using the real pipeline in background (isolated session)
+    background_tasks.add_task(process_document, doc.id, file_bytes)
     
-    return {"message": "Document uploaded and processing started in background", "document_id": doc.id}
+    return {
+        "message": "Document uploaded and processing started in background", 
+        "document_id": doc.id,
+        "scheme_id": scheme.id
+    }
