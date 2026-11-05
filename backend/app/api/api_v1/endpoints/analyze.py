@@ -84,6 +84,11 @@ def _apply_query_overrides(profile, query: str):
             data["state"] = state
             overrides["state"] = state
             break
+            
+    if not overrides.get("state"):
+        if "osmania" in lowered or "hyderabad" in lowered:
+            data["state"] = "Telangana"
+            overrides["state"] = "Telangana"
 
     for category in ["SC", "ST", "OBC", "Minority", "General"]:
         if re.search(rf"\b{re.escape(category.lower())}\b", lowered):
@@ -98,7 +103,7 @@ def _apply_query_overrides(profile, query: str):
         data["gender"] = "Male"
         overrides["gender"] = "Male"
 
-    if "student" in lowered:
+    if "student" in lowered or "degree" in lowered or "college" in lowered or "university" in lowered:
         data["employment_status"] = "Student"
         data["occupation"] = "Student"
         overrides["employment_status"] = "Student"
@@ -119,21 +124,22 @@ async def run_agent_stream(db: Session, cleaned_query: str, analysis_profile: An
         "user_profile": analysis_profile,
     }
     
+    final_state = dict(initial_state)
     try:
         # LangGraph allows streaming state updates
         for event in app_workflow.stream(initial_state):
             # Event is a dictionary where key is the node name and value is the output state
             for node_name, state_update in event.items():
+                if isinstance(state_update, dict):
+                    final_state.update(state_update)
                 yield f"data: {json.dumps({'type': 'step', 'node': node_name})}\n\n"
                 await asyncio.sleep(0.1) # small delay for visual effect on frontend
-                
-                # Keep track of final state manually or extract from last event
-                final_state = state_update
                 
         # Format final results
         safe_results = {}
         for scheme_id, res in final_state.get("eligibility_results", {}).items():
             scheme = db.query(Scheme).filter(Scheme.id == scheme_id).first()
+            details = res.get("details", {})
             safe_results[scheme_id] = {
                 "scheme": {
                     "id": scheme.id if scheme else scheme_id,
@@ -144,9 +150,12 @@ async def run_agent_stream(db: Session, cleaned_query: str, analysis_profile: An
                     "source_url": scheme.source_url if scheme else None,
                 },
                 "status": res["status"],
-                "satisfied_count": len(res["details"]["satisfied"]),
-                "failed_count": len(res["details"]["not_satisfied"]),
-                "unknown_count": len(res["details"]["unknown"]),
+                "satisfied_count": len(details.get("satisfied", [])),
+                "failed_count": len(details.get("not_satisfied", [])),
+                "unknown_count": len(details.get("unknown", [])),
+                "satisfied_criteria": [getattr(r, "description", str(r)) for r in details.get("satisfied", [])],
+                "failed_criteria": [getattr(r, "description", str(r)) for r in details.get("not_satisfied", [])],
+                "unknown_criteria": [getattr(r, "description", str(r)) for r in details.get("unknown", [])],
                 "verification": res.get("verification", {})
             }
             
@@ -216,6 +225,7 @@ def run_analysis(
     safe_results = {}
     for scheme_id, res in final_state.get("eligibility_results", {}).items():
         scheme = db.query(Scheme).filter(Scheme.id == scheme_id).first()
+        details = res.get("details", {})
         safe_results[scheme_id] = {
             "scheme": {
                 "id": scheme.id if scheme else scheme_id,
@@ -226,9 +236,12 @@ def run_analysis(
                 "source_url": scheme.source_url if scheme else None,
             },
             "status": res["status"],
-            "satisfied_count": len(res["details"]["satisfied"]),
-            "failed_count": len(res["details"]["not_satisfied"]),
-            "unknown_count": len(res["details"]["unknown"]),
+            "satisfied_count": len(details.get("satisfied", [])),
+            "failed_count": len(details.get("not_satisfied", [])),
+            "unknown_count": len(details.get("unknown", [])),
+            "satisfied_criteria": [getattr(r, "description", str(r)) for r in details.get("satisfied", [])],
+            "failed_criteria": [getattr(r, "description", str(r)) for r in details.get("not_satisfied", [])],
+            "unknown_criteria": [getattr(r, "description", str(r)) for r in details.get("unknown", [])],
             "verification": res.get("verification", {})
         }
         

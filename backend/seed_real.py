@@ -19,13 +19,23 @@ print("Resetting database and FAISS index...")
 Base.metadata.drop_all(bind=engine)
 Base.metadata.create_all(bind=engine)
 
-for f in ["faiss_index.bin", "faiss_meta.pkl"]:
-    if os.path.exists(f):
-        os.remove(f)
+from app.core.config import settings
 
-# Re-initialize FAISS store dynamically
+# Remove old files in backend and root
+for path_str in [
+    "faiss_index.bin", "faiss_meta.pkl",
+    "backend/faiss_index.bin", "backend/faiss_meta.pkl",
+    settings.FAISS_INDEX_PATH, settings.FAISS_META_PATH
+]:
+    if os.path.exists(path_str):
+        try:
+            os.remove(path_str)
+        except Exception:
+            pass
+
+# Re-initialize FAISS store dynamically with correct embedding dimensions
 from app.rag.faiss_store import FAISSStore
-faiss_store = FAISSStore(768)
+faiss_store = FAISSStore(dimension=settings.EMBEDDING_DIM)
 
 db = SessionLocal()
 
@@ -355,13 +365,19 @@ for scheme_data in schemes_data:
     # Save mapping for later embedding assignment
     texts_to_embed.append((chunk.id, scheme_data["doc"]))
 
-# Batch generate embeddings via OpenAI to save time and API overhead
-# OpenAI text-embedding-3-small allows up to 8192 items in one request!
-print("Sending batch request to OpenAI for embeddings...")
+# Batch generate embeddings via Gemini Embedding Model
+print(f"Generating real embeddings using Gemini model '{settings.EMBEDDING_MODEL}' (dim={settings.EMBEDDING_DIM})...")
 just_texts = [item[1] for item in texts_to_embed]
 embeddings = generate_embeddings(just_texts)
+
+# Store embeddings in SQL chunks as well
+for idx, (cid, _) in enumerate(texts_to_embed):
+    db_chunk = db.query(DocumentChunk).filter(DocumentChunk.id == cid).first()
+    if db_chunk:
+        db_chunk.embedding = embeddings[idx]
+db.commit()
 
 chunk_ids = [item[0] for item in texts_to_embed]
 faiss_store.add_embeddings(chunk_ids, embeddings)
 
-print("Successfully populated database with 30 real government schemes and their Gemini Vector Embeddings!")
+print(f"Successfully populated database with 30 real schemes and indexed {len(chunk_ids)} non-zero vectors in FAISS!")

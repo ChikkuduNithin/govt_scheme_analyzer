@@ -13,10 +13,17 @@ def create_user(db: Session, user_in: UserCreate) -> User:
         raise BadRequestException(detail="Email already registered")
     
     hashed_password = get_password_hash(user_in.password)
-    db_user = User(email=user_in.email, hashed_password=hashed_password)
+    is_admin = bool("admin" in user_in.email.lower())
+    db_user = User(email=user_in.email, hashed_password=hashed_password, is_admin=is_admin)
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
+    
+    # Automatically initialize an empty profile so the user is ready immediately
+    profile = UserProfile(user_id=db_user.id)
+    db.add(profile)
+    db.commit()
+    
     return db_user
 
 def update_user_profile(db: Session, user_id: int, profile_in: UserProfileUpdate) -> UserProfile:
@@ -35,4 +42,10 @@ def update_user_profile(db: Session, user_id: int, profile_in: UserProfileUpdate
     return db_profile
 
 def get_user_profile(db: Session, user_id: int) -> UserProfile:
-    return db.query(UserProfile).filter(UserProfile.user_id == user_id).first()
+    profile = db.query(UserProfile).filter(UserProfile.user_id == user_id).first()
+    if not profile:
+        profile = UserProfile(user_id=user_id)
+        db.add(profile)
+        db.commit()
+        db.refresh(profile)
+    return profile

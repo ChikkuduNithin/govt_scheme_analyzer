@@ -18,15 +18,17 @@ async def upload_document(
     db: Session = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_admin_user),
 ) -> Any:
-    """Upload a government scheme document (Admin only)."""
+    """Upload a government scheme document and process it in background (Admin only)."""
     # Verify scheme exists
-    scheme_service.get_scheme(db, scheme_id)
+    scheme = scheme_service.get_scheme(db, scheme_id)
+    if not scheme:
+        raise HTTPException(status_code=404, detail="Scheme not found")
     
     # Validate file type
-    filename = file.filename
+    filename = file.filename or "uploaded_document.pdf"
     ext = filename.split('.')[-1].lower() if '.' in filename else ''
-    if ext not in ['pdf', 'docx', 'html']:
-        raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF, DOCX, or HTML.")
+    if ext not in ['pdf', 'docx', 'doc', 'html', 'txt']:
+        raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF, DOCX, HTML, or TXT.")
         
     # Create document record
     db_document = Document(
@@ -42,10 +44,14 @@ async def upload_document(
     # Read file bytes
     file_bytes = await file.read()
     
-    # Process offline
-    background_tasks.add_task(process_document, db, db_document.id, file_bytes)
+    # Process offline with a fresh isolated session inside the worker
+    background_tasks.add_task(process_document, db_document.id, file_bytes)
     
-    return {"message": "Document uploaded and processing started.", "document_id": db_document.id}
+    return {
+        "message": "Document uploaded and processing started.",
+        "document_id": db_document.id,
+        "scheme_id": scheme_id
+    }
 
 @router.get("/")
 def list_documents(
@@ -56,5 +62,4 @@ def list_documents(
 ) -> Any:
     """List all documents and their status (Admin only)."""
     docs = db.query(Document).offset(skip).limit(limit).all()
-    # Simple dict conversion for now
-    return [{"id": d.id, "filename": d.filename, "status": d.status, "scheme_id": d.scheme_id} for d in docs]
+    return [{"id": d.id, "filename": d.filename, "status": d.status, "scheme_id": d.scheme_id, "file_type": d.file_type} for d in docs]
